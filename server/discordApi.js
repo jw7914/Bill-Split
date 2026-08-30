@@ -110,8 +110,14 @@ async function handleDiscordSend(request, response) {
   if (!discordResponse.ok) {
     const details = await readDiscordError(discordResponse)
 
+    let errorReason = 'Discord rejected the message.'
+    if (details && typeof details === 'object' && details.code === 50001) {
+      errorReason =
+        'Discord rejected the message (Missing Access - Code 50001). The bot needs permission to access this private channel. Click "Add Server" to re-authorize the bot with Administrator permissions, or add the bot/bot role to the private channel permissions in Discord.'
+    }
+
     sendJson(response, discordResponse.status, {
-      error: 'Discord rejected the message.',
+      error: errorReason,
       details,
     })
     return
@@ -191,7 +197,7 @@ async function handleDiscordInstallUrl(response) {
   const installUrl = new URL('https://discord.com/oauth2/authorize')
 
   installUrl.searchParams.set('client_id', botUser.id)
-  installUrl.searchParams.set('permissions', '3072')
+  installUrl.searchParams.set('permissions', '8')
   installUrl.searchParams.set('scope', 'bot applications.commands')
 
   sendJson(response, 200, { installUrl: installUrl.toString() })

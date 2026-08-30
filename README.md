@@ -24,9 +24,9 @@ Add these values to `.env`:
 DISCORD_BOT_TOKEN=your_discord_bot_token
 ```
 
-The Discord bot must be invited to any server you want to send messages to. It needs permission to view channels and send messages in the target channel.
+The Discord bot must be invited to any server you want to send messages to. It needs permission to view channels and send messages in the target channel. The bot install URL requests Administrator permissions (`permissions=8`), allowing access to private server channels without manual per-channel setup.
 
-Use **Add Server** in the app to open Discord's authorization flow for the current bot. After adding the bot to another server, return to the app and click **Refresh Discord**.
+Use **Add Server** in the app to open Discord's authorization flow for the current bot. If you previously invited the bot with standard permissions and are encountering `Missing Access (50001)` errors in private channels, re-authorize the bot using **Add Server** to grant Administrator permissions (or manually add the bot/bot role to the private channel's permissions in Discord). After updating the bot in your server, return to the app and click **Refresh**.
 
 To select Discord users from the app, enable **Server Members Intent** for the bot in Discord Developer Portal:
 

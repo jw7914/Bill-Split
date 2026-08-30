@@ -2,6 +2,8 @@ import { createServer } from 'node:http'
 import { existsSync, readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
 
+import { handleAuthApi, handleUserGuildsApi } from './authApi.js'
+import { handleBillsApi } from './billsApi.js'
 import { handleDiscordApi, handleHealth } from './discordApi.js'
 
 const PORT = Number(process.env.PORT || 8787)
@@ -16,8 +18,23 @@ const server = createServer(async (request, response) => {
     return
   }
 
+  if (url.pathname.startsWith('/api/auth/')) {
+    await handleAuthApi(request, response)
+    return
+  }
+
+  if (url.pathname === '/api/discord/user-guilds') {
+    await handleUserGuildsApi(request, response)
+    return
+  }
+
   if (url.pathname.startsWith('/api/discord/')) {
     await handleDiscordApi(request, response)
+    return
+  }
+
+  if (url.pathname === '/api/bills' || url.pathname.startsWith('/api/bills/')) {
+    await handleBillsApi(request, response)
     return
   }
 

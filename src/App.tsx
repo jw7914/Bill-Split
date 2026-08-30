@@ -1,6 +1,16 @@
-import { useEffect, useMemo, useState, type FormEvent } from 'react'
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type FormEvent,
+} from 'react'
 import {
   Calculator,
+  CloudCheck,
+  LogIn,
+  LogOut,
   Plus,
   ReceiptText,
   RefreshCw,
@@ -47,12 +57,37 @@ type DiscordMember = {
   username: string
 }
 
+type BillSummary = {
+  id: string
+  billName: string
+  updatedAt: string
+}
+
+type UserProfile = {
+  id: string
+  username: string
+  globalName: string
+  avatar: string
+}
+
 const currencyFormatter = new Intl.NumberFormat('en-US', {
   style: 'currency',
   currency: 'USD',
 })
 
 function App() {
+  const [currentUser, setCurrentUser] = useState<UserProfile | null>(null)
+  const [allUsers, setAllUsers] = useState<UserProfile[]>([])
+  const [billId, setBillId] = useState('')
+  const [recentBills, setRecentBills] = useState<BillSummary[]>([])
+  const [syncStatus, setSyncStatus] = useState<
+    'synced' | 'saving' | 'error' | 'loading'
+  >('loading')
+
+  const isInitialMountRef = useRef(true)
+  const isUpdatingFromRemoteRef = useRef(false)
+  const lastRemoteUpdatedAtRef = useRef<string>('')
+
   const [billName, setBillName] = useState('')
   const [total, setTotal] = useState('')
   const [dueDate, setDueDate] = useState('')
@@ -166,9 +201,402 @@ function App() {
       validItems.every((item) => item.assignedUserIds.length > 0)) &&
     selectedChannelId
 
+  const loadBill = useCallback(async (id: string) => {
+    try {
+      setSyncStatus('loading')
+      const res = await fetch(`/api/bills/${id}`)
+      const data = await res.json()
+
+      if (!res.ok || !data.bill) {
+        throw new Error(data.error || 'Bill not found')
+      }
+
+      const bill = data.bill
+      isUpdatingFromRemoteRef.current = true
+      lastRemoteUpdatedAtRef.current = bill.updatedAt || ''
+
+      setBillId(bill.id)
+      setBillName(bill.billName || '')
+      setTotal(bill.total ? String(bill.total) : '')
+      setDueDate(bill.dueDate || '')
+      setNote(bill.note || '')
+      setSendItemized(Boolean(bill.sendItemized))
+      setItems(
+        Array.isArray(bill.items) && bill.items.length > 0
+          ? bill.items.map((it: BillItem) => ({
+              id: it.id || crypto.randomUUID(),
+              name: it.name || '',
+              amount: it.amount != null ? String(it.amount) : '',
+              note: it.note || '',
+              assignedUserIds: Array.isArray(it.assignedUserIds)
+                ? it.assignedUserIds
+                : [],
+            }))
+          : [
+              {
+                id: crypto.randomUUID(),
+                name: '',
+                amount: '',
+                note: '',
+                assignedUserIds: [],
+              },
+            ],
+      )
+      setParticipants(Array.isArray(bill.participants) ? bill.participants : [])
+      if (bill.selectedGuildId) setSelectedGuildId(bill.selectedGuildId)
+      if (bill.selectedChannelId) setSelectedChannelId(bill.selectedChannelId)
+
+      setSyncStatus('synced')
+
+      const url = new URL(window.location.href)
+      if (url.searchParams.get('billId') !== bill.id) {
+        url.searchParams.set('billId', bill.id)
+        window.history.replaceState(null, '', url.toString())
+      }
+    } catch {
+      setSyncStatus('error')
+    } finally {
+      setTimeout(() => {
+        isUpdatingFromRemoteRef.current = false
+      }, 100)
+    }
+  }, [])
+
+  const fetchRecentBills = useCallback(async () => {
+    try {
+      const res = await fetch('/api/bills')
+      const data = await res.json()
+      if (res.ok && Array.isArray(data.bills)) {
+        setRecentBills(data.bills)
+      }
+    } catch {
+      // ignore errors fetching list
+    }
+  }, [])
+
+  const createNewBill = useCallback(async () => {
+    try {
+      setSyncStatus('loading')
+      const res = await fetch('/api/bills', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          billName: 'New Shared Bill',
+          total: 0,
+          sendItemized: false,
+          items: [],
+          participants: [],
+        }),
+      })
+      const data = await res.json()
+      if (res.ok && data.bill) {
+        await loadBill(data.bill.id)
+        void fetchRecentBills()
+      }
+    } catch {
+      setSyncStatus('error')
+    }
+  }, [fetchRecentBills, loadBill])
+
+  useEffect(() => {
+    async function initSession() {
+      const urlParams = new URLSearchParams(window.location.search)
+      const requestedId = urlParams.get('billId')
+
+      void fetchRecentBills()
+
+      if (requestedId) {
+        await loadBill(requestedId)
+      } else {
+        await createNewBill()
+      }
+      isInitialMountRef.current = false
+    }
+
+    void initSession()
+  }, [createNewBill, fetchRecentBills, loadBill])
+
+  useEffect(() => {
+    if (isInitialMountRef.current || !billId || isUpdatingFromRemoteRef.current) {
+      return
+    }
+
+    setSyncStatus('saving')
+
+    const timer = setTimeout(async () => {
+      try {
+        const payload = {
+          billName,
+          total: numericTotal || 0,
+          dueDate,
+          note,
+          sendItemized,
+          items: items.map((item) => ({
+            id: item.id,
+            name: item.name,
+            amount: Number(item.amount) || 0,
+            note: item.note,
+            assignedUserIds: item.assignedUserIds,
+          })),
+          participants,
+          selectedGuildId,
+          selectedChannelId,
+        }
+
+        const res = await fetch(`/api/bills/${billId}`, {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload),
+        })
+
+        const data = await res.json()
+        if (res.ok && data.bill) {
+          lastRemoteUpdatedAtRef.current = data.bill.updatedAt
+          setSyncStatus('synced')
+        } else {
+          setSyncStatus('error')
+        }
+      } catch {
+        setSyncStatus('error')
+      }
+    }, 500)
+
+    return () => clearTimeout(timer)
+  }, [
+    billId,
+    billName,
+    dueDate,
+    items,
+    note,
+    numericTotal,
+    participants,
+    selectedChannelId,
+    selectedGuildId,
+    sendItemized,
+  ])
+
+  useEffect(() => {
+    if (!billId) return
+
+    const interval = setInterval(async () => {
+      if (isUpdatingFromRemoteRef.current || syncStatus === 'saving') {
+        return
+      }
+
+      try {
+        const res = await fetch(`/api/bills/${billId}`)
+        const data = await res.json()
+
+        if (res.ok && data.bill) {
+          const remoteBill = data.bill
+          if (
+            remoteBill.updatedAt &&
+            remoteBill.updatedAt !== lastRemoteUpdatedAtRef.current
+          ) {
+            isUpdatingFromRemoteRef.current = true
+            lastRemoteUpdatedAtRef.current = remoteBill.updatedAt
+
+            setBillName(remoteBill.billName || '')
+            setTotal(remoteBill.total ? String(remoteBill.total) : '')
+            setDueDate(remoteBill.dueDate || '')
+            setNote(remoteBill.note || '')
+            setSendItemized(Boolean(remoteBill.sendItemized))
+            setItems(
+              Array.isArray(remoteBill.items) && remoteBill.items.length > 0
+                ? remoteBill.items.map((it: BillItem) => ({
+                    id: it.id || crypto.randomUUID(),
+                    name: it.name || '',
+                    amount: it.amount != null ? String(it.amount) : '',
+                    note: it.note || '',
+                    assignedUserIds: Array.isArray(it.assignedUserIds)
+                      ? it.assignedUserIds
+                      : [],
+                  }))
+                : [],
+            )
+            setParticipants(
+              Array.isArray(remoteBill.participants)
+                ? remoteBill.participants
+                : [],
+            )
+            setSyncStatus('synced')
+
+            setTimeout(() => {
+              isUpdatingFromRemoteRef.current = false
+            }, 100)
+          }
+        }
+
+        void fetchRecentBills()
+      } catch {
+        // ignore background fetch error
+      }
+    }, 2000)
+
+    return () => clearInterval(interval)
+  }, [billId, fetchRecentBills, syncStatus])
+
+  const fetchAuthSession = useCallback(async (selectedUserId?: string) => {
+    try {
+      const activeId = selectedUserId || localStorage.getItem('activeUserId') || ''
+      const res = await fetch(`/api/auth/me?activeUserId=${activeId}`)
+      const data = await res.json()
+
+      if (res.ok && data.ok) {
+        if (data.activeUser) {
+          setCurrentUser(data.activeUser)
+          localStorage.setItem('activeUserId', data.activeUser.id)
+        }
+        if (Array.isArray(data.users)) {
+          setAllUsers(data.users)
+        }
+      }
+    } catch {
+      // ignore
+    }
+  }, [])
+
+  function loginWithDiscord() {
+    window.location.href = '/api/auth/discord/login'
+  }
+
+  function switchUser(userId: string) {
+    localStorage.setItem('activeUserId', userId)
+    void fetchAuthSession(userId)
+  }
+
+  async function logoutUser(userId: string) {
+    try {
+      await fetch('/api/auth/logout', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ userId }),
+      })
+    } catch {
+      // ignore logout error
+    }
+    localStorage.removeItem('activeUserId')
+    setCurrentUser(null)
+    const remainingUsers = allUsers.filter((u) => u.id !== userId)
+    setAllUsers(remainingUsers)
+
+    setGuilds([])
+    setChannels([])
+    setMembers([])
+    setSelectedGuildId('')
+    setSelectedChannelId('')
+
+    if (remainingUsers.length > 0) {
+      switchUser(remainingUsers[0].id)
+    }
+  }
+
+  const loadGuilds = useCallback(async () => {
+    const activeId = currentUser?.id || localStorage.getItem('activeUserId') || ''
+
+    if (!activeId) {
+      setGuilds([])
+      setChannels([])
+      setMembers([])
+      setSelectedGuildId('')
+      setSelectedChannelId('')
+      setDiscordStatus('Sign in with Discord to view servers.')
+      return
+    }
+
+    setDiscordLoading(true)
+    setDiscordStatus('Loading Discord servers...')
+
+    try {
+      const response = await fetch(`/api/discord/user-guilds?userId=${activeId}`)
+      const result = await response.json()
+
+      if (!response.ok) {
+        setGuilds([])
+        setSelectedGuildId('')
+        throw new Error(result.error || 'Unable to load Discord servers.')
+      }
+
+      const loadedGuilds = result.guilds || []
+      setGuilds(loadedGuilds)
+      setSelectedGuildId(loadedGuilds[0]?.id || '')
+      setDiscordStatus(
+        loadedGuilds.length
+          ? 'Choose a server, channel, and users.'
+          : 'No servers found for this account.',
+      )
+    } catch (error) {
+      setGuilds([])
+      setSelectedGuildId('')
+      setDiscordStatus(
+        error instanceof Error ? error.message : 'Unable to load Discord servers.',
+      )
+    } finally {
+      setDiscordLoading(false)
+    }
+  }, [currentUser])
+
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search)
+    const activeUserIdParam = params.get('activeUserId')
+
+    if (activeUserIdParam) {
+      localStorage.setItem('activeUserId', activeUserIdParam)
+      const url = new URL(window.location.href)
+      url.searchParams.delete('activeUserId')
+      window.history.replaceState(null, '', url.toString())
+    }
+
+    void fetchAuthSession(activeUserIdParam || undefined)
+  }, [fetchAuthSession])
+
   useEffect(() => {
     void loadGuilds()
-  }, [])
+  }, [loadGuilds])
+
+  async function loadDiscordContext(guildId: string) {
+    setDiscordLoading(true)
+    setChannels([])
+    setMembers([])
+    setSelectedChannelId('')
+    setParticipants([])
+    setMemberSearch('')
+    setDiscordStatus('Loading channels and members...')
+
+    try {
+      const [channelsResponse, membersResponse] = await Promise.all([
+        fetch(`/api/discord/guilds/${guildId}/channels`),
+        fetch(`/api/discord/guilds/${guildId}/members`),
+      ])
+      const channelsResult = await channelsResponse.json()
+      const membersResult = await membersResponse.json()
+
+      if (!channelsResponse.ok) {
+        throw new Error(
+          channelsResult.error || 'Unable to load Discord channels.',
+        )
+      }
+
+      if (!membersResponse.ok) {
+        throw new Error(membersResult.error || 'Unable to load Discord users.')
+      }
+
+      setChannels(channelsResult.channels)
+      setMembers(membersResult.members)
+      setSelectedChannelId(channelsResult.channels[0]?.id || '')
+      setDiscordStatus(
+        membersResult.members.length
+          ? ''
+          : 'No users are visible to the bot in this server.',
+      )
+    } catch (error) {
+      setDiscordStatus(
+        error instanceof Error ? error.message : 'Unable to load Discord users.',
+      )
+    } finally {
+      setDiscordLoading(false)
+    }
+  }
 
   useEffect(() => {
     if (selectedGuildId) {
@@ -234,78 +662,6 @@ function App() {
       setStatusMessage(
         error instanceof Error ? error.message : 'Unable to send Discord message.',
       )
-    }
-  }
-
-  async function loadGuilds() {
-    setDiscordLoading(true)
-    setDiscordStatus('Loading Discord servers...')
-
-    try {
-      const response = await fetch('/api/discord/guilds')
-      const result = await response.json()
-
-      if (!response.ok) {
-        throw new Error(result.error || 'Unable to load Discord servers.')
-      }
-
-      setGuilds(result.guilds)
-      setSelectedGuildId(result.guilds[0]?.id || '')
-      setDiscordStatus(
-        result.guilds.length
-          ? 'Choose a server, channel, and users.'
-          : 'The bot is not in any servers yet.',
-      )
-    } catch (error) {
-      setDiscordStatus(
-        error instanceof Error ? error.message : 'Unable to load Discord servers.',
-      )
-    } finally {
-      setDiscordLoading(false)
-    }
-  }
-
-  async function loadDiscordContext(guildId: string) {
-    setDiscordLoading(true)
-    setChannels([])
-    setMembers([])
-    setSelectedChannelId('')
-    setParticipants([])
-    setMemberSearch('')
-    setDiscordStatus('Loading channels and members...')
-
-    try {
-      const [channelsResponse, membersResponse] = await Promise.all([
-        fetch(`/api/discord/guilds/${guildId}/channels`),
-        fetch(`/api/discord/guilds/${guildId}/members`),
-      ])
-      const channelsResult = await channelsResponse.json()
-      const membersResult = await membersResponse.json()
-
-      if (!channelsResponse.ok) {
-        throw new Error(
-          channelsResult.error || 'Unable to load Discord channels.',
-        )
-      }
-
-      if (!membersResponse.ok) {
-        throw new Error(membersResult.error || 'Unable to load Discord users.')
-      }
-
-      setChannels(channelsResult.channels)
-      setMembers(membersResult.members)
-      setSelectedChannelId(channelsResult.channels[0]?.id || '')
-      setDiscordStatus(
-        membersResult.members.length
-          ? ''
-          : 'No users are visible to the bot in this server.',
-      )
-    } catch (error) {
-      setDiscordStatus(
-        error instanceof Error ? error.message : 'Unable to load Discord users.',
-      )
-    } finally {
-      setDiscordLoading(false)
     }
   }
 
@@ -415,80 +771,189 @@ function App() {
       <header className="border-b border-border bg-card">
         <div className="mx-auto flex max-w-7xl flex-col gap-4 px-4 py-4 sm:px-6 lg:px-8">
           <div className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
-          <a href="#" className="flex items-center gap-3 font-semibold">
-            <span className="flex size-9 items-center justify-center rounded-lg bg-primary text-primary-foreground">
-              <ReceiptText className="size-5" />
-            </span>
-            <span>Budget Message</span>
-          </a>
+            <div className="flex flex-wrap items-center gap-3">
+              <a href="#" className="flex items-center gap-3 font-semibold">
+                <span className="flex size-9 items-center justify-center rounded-lg bg-primary text-primary-foreground">
+                  <ReceiptText className="size-5" />
+                </span>
+                <span>Budget Message</span>
+              </a>
+
+              <div className="flex items-center gap-2 border-l border-border pl-3">
+                {syncStatus === 'synced' && (
+                  <span className="inline-flex items-center gap-1.5 rounded-full border border-emerald-500/20 bg-emerald-500/10 px-2.5 py-1 text-xs font-medium text-emerald-600 dark:text-emerald-400">
+                    <CloudCheck className="size-3.5" /> Live Sync
+                  </span>
+                )}
+                {syncStatus === 'saving' && (
+                  <span className="inline-flex items-center gap-1.5 rounded-full border border-amber-500/20 bg-amber-500/10 px-2.5 py-1 text-xs font-medium text-amber-600 dark:text-amber-400">
+                    <RefreshCw className="size-3.5 animate-spin" /> Saving...
+                  </span>
+                )}
+                {syncStatus === 'loading' && (
+                  <span className="inline-flex items-center gap-1.5 rounded-full bg-muted px-2.5 py-1 text-xs font-medium text-muted-foreground">
+                    <RefreshCw className="size-3.5 animate-spin" /> Syncing...
+                  </span>
+                )}
+                {syncStatus === 'error' && (
+                  <span className="inline-flex items-center gap-1.5 rounded-full border border-destructive/20 bg-destructive/10 px-2.5 py-1 text-xs font-medium text-destructive">
+                    Sync Error
+                  </span>
+                )}
+              </div>
+            </div>
+
             <div className="flex flex-wrap items-center gap-2">
-            <Button
-              type="button"
-              variant="outline"
-              size="sm"
-              onClick={openDiscordInstall}
-              disabled={installLoading}
-            >
-              <UserPlus className="size-3.5" />
-              Add Server
-            </Button>
+              {recentBills.length > 0 && (
+                <select
+                  value={billId}
+                  onChange={(e) => void loadBill(e.target.value)}
+                  className="h-8 max-w-44 rounded-md border border-input bg-background px-2 text-xs font-medium shadow-xs outline-none transition-[color,box-shadow] focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/50"
+                  aria-label="Recent Bills"
+                >
+                  {recentBills.map((b) => (
+                    <option key={b.id} value={b.id}>
+                      {b.billName || 'Untitled Bill'} ({b.id.slice(0, 6)})
+                    </option>
+                  ))}
+                </select>
+              )}
+
               <Button
                 type="button"
                 variant="outline"
                 size="sm"
-                onClick={loadGuilds}
-                disabled={discordLoading}
+                onClick={() => void createNewBill()}
               >
-                <RefreshCw className="size-3.5" />
-                Refresh
+                <Plus className="size-3.5" />
+                New Bill
               </Button>
+
+              {currentUser ? (
+                <>
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="sm"
+                    onClick={openDiscordInstall}
+                    disabled={installLoading}
+                  >
+                    <UserPlus className="size-3.5" />
+                    Add Server
+                  </Button>
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="sm"
+                    onClick={loadGuilds}
+                    disabled={discordLoading}
+                  >
+                    <RefreshCw className="size-3.5" />
+                    Refresh
+                  </Button>
+
+                  <div className="flex items-center gap-2 rounded-lg border border-border bg-muted/60 px-2.5 py-1">
+                    {currentUser.avatar ? (
+                      <img
+                        src={currentUser.avatar}
+                        alt={currentUser.globalName}
+                        className="size-5 rounded-full"
+                      />
+                    ) : (
+                      <span className="flex size-5 items-center justify-center rounded-full bg-primary text-[10px] font-bold text-primary-foreground">
+                        {currentUser.username[0]?.toUpperCase()}
+                      </span>
+                    )}
+                    <span className="text-xs font-medium">
+                      @{currentUser.username}
+                    </span>
+
+                    {allUsers.length > 1 && (
+                      <select
+                        value={currentUser.id}
+                        onChange={(e) => switchUser(e.target.value)}
+                        className="ml-1 h-6 rounded border border-input bg-background px-1 text-[11px] font-medium outline-none"
+                        aria-label="Switch User Account"
+                      >
+                        {allUsers.map((u) => (
+                          <option key={u.id} value={u.id}>
+                            @{u.username}
+                          </option>
+                        ))}
+                      </select>
+                    )}
+
+                    <button
+                      type="button"
+                      onClick={() => void logoutUser(currentUser.id)}
+                      className="ml-1 flex size-5 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-background hover:text-destructive"
+                      title="Log out"
+                      aria-label="Log out"
+                    >
+                      <LogOut className="size-3.5" />
+                    </button>
+                  </div>
+                </>
+              ) : (
+                <Button
+                  type="button"
+                  variant="default"
+                  size="sm"
+                  onClick={loginWithDiscord}
+                >
+                  <LogIn className="size-3.5" />
+                  Sign in with Discord
+                </Button>
+              )}
             </div>
           </div>
 
-          <div className="grid gap-3 lg:grid-cols-[1fr_220px_220px] lg:items-end">
-            <div>
-              <p className="text-sm text-muted-foreground">Discord target</p>
-              <h1 className="mt-1 text-lg font-semibold tracking-normal">
-                Pick where this bill should be sent
-              </h1>
+          {currentUser && (
+            <div className="grid gap-3 lg:grid-cols-[1fr_220px_220px] lg:items-end">
+              <div>
+                <p className="text-sm text-muted-foreground">Discord target</p>
+                <h1 className="mt-1 text-lg font-semibold tracking-normal">
+                  Pick where this bill should be sent
+                </h1>
+              </div>
+              <label className="space-y-1">
+                <span className="text-xs font-medium text-muted-foreground">
+                  Server
+                </span>
+                <select
+                  value={selectedGuildId}
+                  onChange={(event) => setSelectedGuildId(event.target.value)}
+                  className="h-9 w-full rounded-md border border-input bg-transparent px-3 py-1 text-sm shadow-xs outline-none transition-[color,box-shadow] focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/50"
+                  disabled={discordLoading || guilds.length === 0}
+                >
+                  {guilds.length === 0 && <option value="">No servers</option>}
+                  {guilds.map((guild) => (
+                    <option key={guild.id} value={guild.id}>
+                      {guild.name}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <label className="space-y-1">
+                <span className="text-xs font-medium text-muted-foreground">
+                  Channel
+                </span>
+                <select
+                  value={selectedChannelId}
+                  onChange={(event) => setSelectedChannelId(event.target.value)}
+                  className="h-9 w-full rounded-md border border-input bg-transparent px-3 py-1 text-sm shadow-xs outline-none transition-[color,box-shadow] focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/50"
+                  disabled={discordLoading || channels.length === 0}
+                >
+                  {channels.length === 0 && <option value="">No channels</option>}
+                  {channels.map((channel) => (
+                    <option key={channel.id} value={channel.id}>
+                      #{channel.name}
+                    </option>
+                  ))}
+                </select>
+              </label>
             </div>
-            <label className="space-y-1">
-              <span className="text-xs font-medium text-muted-foreground">
-                Server
-              </span>
-              <select
-                value={selectedGuildId}
-                onChange={(event) => setSelectedGuildId(event.target.value)}
-                className="h-9 w-full rounded-md border border-input bg-transparent px-3 py-1 text-sm shadow-xs outline-none transition-[color,box-shadow] focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/50"
-                disabled={discordLoading || guilds.length === 0}
-              >
-                {guilds.length === 0 && <option value="">No servers</option>}
-                {guilds.map((guild) => (
-                  <option key={guild.id} value={guild.id}>
-                    {guild.name}
-                  </option>
-                ))}
-              </select>
-            </label>
-            <label className="space-y-1">
-              <span className="text-xs font-medium text-muted-foreground">
-                Channel
-              </span>
-              <select
-                value={selectedChannelId}
-                onChange={(event) => setSelectedChannelId(event.target.value)}
-                className="h-9 w-full rounded-md border border-input bg-transparent px-3 py-1 text-sm shadow-xs outline-none transition-[color,box-shadow] focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/50"
-                disabled={discordLoading || channels.length === 0}
-              >
-                {channels.length === 0 && <option value="">No channels</option>}
-                {channels.map((channel) => (
-                  <option key={channel.id} value={channel.id}>
-                    #{channel.name}
-                  </option>
-                ))}
-              </select>
-            </label>
-          </div>
+          )}
         </div>
       </header>
 
