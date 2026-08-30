@@ -1,7 +1,10 @@
+import { createHmac, timingSafeEqual } from "node:crypto";
+
 import { getUser, listUsers, saveUser } from "./mongoClient.js";
 
 const DISCORD_API_BASE = "https://discord.com/api/v10";
 const oauthStateStore = new Map();
+const OAUTH_STATE_TTL_MS = 10 * 60 * 1000;
 
 export async function handleAuthApi(request, response) {
   if (request.method === "OPTIONS") {
@@ -219,7 +222,8 @@ async function handleDiscordUserLogin(request, response, url) {
   }
 
   const state = crypto.randomUUID();
-  oauthStateStore.set(state, Date.now() + 10 * 60 * 1000);
+  persistOauthState(state);
+  setOauthStateCookie(response, state);
 
   const authUrl = new URL("https://discord.com/oauth2/authorize");
   authUrl.searchParams.set("client_id", clientId);
@@ -240,7 +244,9 @@ async function handleDiscordUserLogin(request, response, url) {
 
 async function handleDiscordUserCallback(request, response, url) {
   const code = url.searchParams.get("code");
-  const state = url.searchParams.get("state");
+  const incomingState = url.searchParams.get("state");
+  const cookieState = readOauthStateFromCookie(request.headers.cookie || "");
+  const state = incomingState || cookieState;
 
   if (!code) {
     sendJson(response, 400, {
@@ -249,7 +255,11 @@ async function handleDiscordUserCallback(request, response, url) {
     return;
   }
 
-  if (!state || !oauthStateStore.has(state)) {
+  if (
+    !state ||
+    (incomingState && cookieState && incomingState !== cookieState) ||
+    !isValidOauthState(state, cookieState)
+  ) {
     sendJson(response, 400, {
       error:
         "Invalid or expired Discord OAuth state. Please start the sign-in flow again.",
@@ -258,6 +268,7 @@ async function handleDiscordUserCallback(request, response, url) {
   }
 
   oauthStateStore.delete(state);
+  clearOauthStateCookie(response);
 
   const clientId = getClientId();
   const clientSecret = process.env.DISCORD_CLIENT_SECRET;
@@ -420,6 +431,89 @@ async function handleGetAuthMe(request, response, url) {
       details: String(error),
     });
   }
+}
+
+function persistOauthState(state) {
+  oauthStateStore.set(state, Date.now() + OAUTH_STATE_TTL_MS);
+}
+
+function setOauthStateCookie(response, state) {
+  const value = encodeStateValue(state);
+  response.setHeader(
+    "Set-Cookie",
+    `discord_oauth_state=${value}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${Math.floor(OAUTH_STATE_TTL_MS / 1000)};`,
+  );
+}
+
+function clearOauthStateCookie(response) {
+  response.setHeader(
+    "Set-Cookie",
+    "discord_oauth_state=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0;",
+  );
+}
+
+function readOauthStateFromCookie(cookieHeader) {
+  if (!cookieHeader) {
+    return null;
+  }
+
+  const match = cookieHeader
+    .split(";")
+    .map((part) => part.trim())
+    .find((part) => part.startsWith("discord_oauth_state="));
+
+  if (!match) {
+    return null;
+  }
+
+  const encoded = match.slice("discord_oauth_state=".length);
+  if (!encoded) {
+    return null;
+  }
+
+  try {
+    const payload = JSON.parse(
+      Buffer.from(encoded, "base64url").toString("utf8"),
+    );
+
+    if (!payload || typeof payload.state !== "string") {
+      return null;
+    }
+
+    if (typeof payload.exp !== "number" || payload.exp <= Date.now()) {
+      return null;
+    }
+
+    return payload.state;
+  } catch {
+    return null;
+  }
+}
+
+function encodeStateValue(state) {
+  const payload = JSON.stringify({
+    state,
+    exp: Date.now() + OAUTH_STATE_TTL_MS,
+  });
+
+  return Buffer.from(payload).toString("base64url");
+}
+
+function isValidOauthState(state, cookieState) {
+  if (!state) {
+    return false;
+  }
+
+  const memoryExpiry = oauthStateStore.get(state);
+  if (memoryExpiry && Number(memoryExpiry) > Date.now()) {
+    return true;
+  }
+
+  if (memoryExpiry) {
+    oauthStateStore.delete(state);
+  }
+
+  return !!cookieState && cookieState === state;
 }
 
 function getClientId() {
