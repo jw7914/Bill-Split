@@ -8,30 +8,34 @@ export async function handleAuthApi(request, response) {
     return
   }
 
-  const url = new URL(request.url || '/', `http://${request.headers.host}`)
-  const path = url.pathname
+  const url = new URL(request.url || '/', `http://${request.headers.host || 'localhost'}`)
+  let path = url.pathname
 
-  if (request.method === 'GET' && path === '/api/auth/discord/login') {
+  if (!path.startsWith('/api/auth/')) {
+    path = '/api/auth/' + path.replace(/^\/+(api\/auth\/)?/, '')
+  }
+
+  if (request.method === 'GET' && (path === '/api/auth/discord/login' || path.endsWith('/discord/login'))) {
     await handleDiscordUserLogin(request, response, url)
     return
   }
 
-  if (request.method === 'GET' && path === '/api/auth/discord/callback') {
+  if (request.method === 'GET' && (path === '/api/auth/discord/callback' || path.endsWith('/discord/callback'))) {
     await handleDiscordUserCallback(request, response, url)
     return
   }
 
-  if (request.method === 'GET' && path === '/api/auth/me') {
+  if (request.method === 'GET' && (path === '/api/auth/me' || path.endsWith('/me'))) {
     await handleGetAuthMe(request, response, url)
     return
   }
 
-  if (request.method === 'POST' && path === '/api/auth/logout') {
+  if (request.method === 'POST' && (path === '/api/auth/logout' || path.endsWith('/logout'))) {
     await handleLogoutUser(request, response, url)
     return
   }
 
-  sendJson(response, 404, { error: 'Auth endpoint not found' })
+  sendJson(response, 404, { error: `Auth endpoint ${path} not found` })
 }
 
 export async function handleUserGuildsApi(request, response) {
