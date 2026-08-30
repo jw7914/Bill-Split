@@ -369,11 +369,13 @@ function getClientId() {
 }
 
 function getRedirectUri(url) {
-  if (process.env.DISCORD_REDIRECT_URI) {
-    return process.env.DISCORD_REDIRECT_URI
+  let uri = process.env.DISCORD_REDIRECT_URI
+
+  if (!uri) {
+    uri = `${url.protocol}//${url.host}/api/auth/discord/callback`
   }
 
-  return `${url.protocol}//${url.host}/api/auth/discord/callback`
+  return uri.replace(/([^:]\/)\/+/g, '$1')
 }
 
 function sendJson(response, statusCode, body) {
