@@ -46,6 +46,24 @@ npm run dev
 
 The app runs at `http://127.0.0.1:5173/`.
 
+## Vercel Deployment
+
+This project is ready to deploy on Vercel as a Vite app with serverless API routes.
+
+In Vercel:
+
+1. Import this repository as a new project.
+2. Use the default framework detection for Vite.
+3. Set the build command to `npm run build`.
+4. Set the output directory to `dist`.
+5. Add this environment variable in **Project Settings → Environment Variables**:
+
+```sh
+DISCORD_BOT_TOKEN=your_discord_bot_token
+```
+
+After changing Vercel environment variables, redeploy the project so the API routes can read the new values.
+
 ## Scripts
 
 ```sh
