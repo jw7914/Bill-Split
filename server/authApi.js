@@ -300,10 +300,12 @@ async function handleDiscordUserCallback(request, response, url) {
     // Redirect to frontend app with activeUserId query parameter
     let clientOrigin = process.env.CLIENT_ORIGIN
     if (!clientOrigin) {
-      const host = request.headers.host || '127.0.0.1:5173'
-      const frontendHost = host.replace(':8787', ':5173')
-      const protocol = request.headers['x-forwarded-proto'] || 'http'
-      clientOrigin = `${protocol}://${frontendHost}`
+      const host =
+        request.headers['x-forwarded-host'] || request.headers.host || '127.0.0.1:8787'
+      const protocol =
+        request.headers['x-forwarded-proto'] ||
+        (host.includes('localhost') || host.includes('127.0.0.1') ? 'http' : 'https')
+      clientOrigin = `${protocol}://${host}`
     }
 
     const frontendRedirect = new URL('/', clientOrigin)
